@@ -438,6 +438,18 @@ function Block({ block, from }) {
     return (name || "").toLowerCase().trim().replace(/[\s_-]+/g, "");
   }
 
+  // Simple fetch wrapper with timeout to prevent infinite spinners
+  async function fetchWithTimeout(url, opts = {}, timeoutMs = 180000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      return res;
+    } finally {
+      clearTimeout(id);
+    }
+  }
+
   // Build blocks json shape
   function buildBlocksJson() {
     const out = {};
