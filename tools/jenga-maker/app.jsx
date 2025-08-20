@@ -360,7 +360,7 @@ function Block({ block, from }) {
           style={{ boxShadow: "inset 0 6px 12px rgba(0,0,0,0.06)" }}
         >
           {!isUnsorted && (
-            <div className="mb-3 flex items-center gap-3 text-xs text-[#3b2c24]">
+            <div className="mb-3 flex flex-wrap items-center gap-3 text-xs text-[#3b2c24]">
               <label className="font-semibold">Dots</label>
               <input
                 type="number"
@@ -380,6 +380,7 @@ function Block({ block, from }) {
                 className="text-xs"
                 title="Bulk upload images for this category"
               />
+              <span className="rounded bg-white/60 px-2 py-0.5 font-semibold text-[#4a2c2a]">{filesSummary(uploads[catId])}</span>
               {colorMode === "color" && bgStyle === "per-category" && (
                 <>
                   <label className="font-semibold">BG</label>
@@ -391,6 +392,29 @@ function Block({ block, from }) {
                   />
                 </>
               )}
+            </div>
+          )}
+          {!isUnsorted && (
+            <div className="mb-2 text-[11px] text-[#3b2c24]">
+              {(() => {
+                const expected = expectedNamesForCategory({ blocks, name: title });
+                const have = (uploads[catId] || []).length;
+                const missing = Math.max(0, expected.length - have);
+                if (expected.length === 0) return <span className="opacity-70">No blocks in this category.</span>;
+                return (
+                  <div className="flex flex-col gap-1">
+                    <div>
+                      Expected images: <b>{expected.length}</b> • Uploaded: <b>{have}</b> • Missing: <b className={missing>0?"text-red-700":""}>{missing}</b>
+                    </div>
+                    <details>
+                      <summary className="cursor-pointer select-none">Show expected file names</summary>
+                      <div className="mt-1 rounded bg-white/70 p-2 text-[10px] text-[#2d1c1a]">
+                        {expected.join(', ')}
+                      </div>
+                    </details>
+                  </div>
+                );
+              })()}
             </div>
           )}
           <div className={fullWidth ? "flex flex-wrap gap-3" : "flex flex-col gap-3"}>
@@ -422,6 +446,33 @@ function Block({ block, from }) {
     });
     return out;
   }
+  // Expected names helpers
+  function expectedNamesForCategory(cat) {
+    const counts = {};
+    const out = [];
+    const sanitize = (s) => (s || "").trim().split(/\s+/)[0]?.replace(/[^A-Za-z0-9]+/g, "").toLowerCase() || "";
+    (cat.blocks || []).forEach((b) => {
+      const s = (b.text || "").trim();
+      const m = /^\*([^*]+)\*\s*(.*)$/.exec(s);
+      let title;
+      if (m) {
+        title = (m[1] || "").trim();
+      } else {
+        title = s.split(/\s+/)[0] || "";
+      }
+      const base = sanitize(title);
+      const cur = (counts[base] || 0) + 1;
+      counts[base] = cur;
+      out.push(cur === 1 ? `${base}.png` : `${base}${cur}.png`);
+    });
+    return out;
+  }
+  const filesSummary = (files) => {
+    const n = (files || []).length;
+    if (!n) return "No files";
+    if (n === 1) return "1 file";
+    return `${n} files`;
+  };
 
   async function handleGenerate() {
     try {
@@ -469,15 +520,23 @@ function Block({ block, from }) {
         files.forEach((f) => fd.append(field, f, f.name));
       });
 
-      const res = await fetch("/api/generate", { method: "POST", body: fd });
+      const res = await fetchWithTimeout("/api/generate", { method: "POST", body: fd }, 180000);
       if (!res.ok) {
-        let err = "Generation failed";
+        let err = `Generation failed (${res.status})`;
         try {
           const j = await res.json();
           if (j?.error) err = j.error;
         } catch {}
         alert(err);
         return;
+      }
+      const ct = res.headers.get("content-type") || "";
+      if (!ct.includes("application/zip")) {
+        try {
+          const j = await res.json();
+          alert(j?.error || "Unexpected response from server.");
+          return;
+        } catch {}
       }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
