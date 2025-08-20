@@ -562,7 +562,11 @@ function Block({ block, from }) {
       a.remove();
     } catch (e) {
       console.error(e);
-      alert("Error generating images. See console for details.");
+      if (e && e.name === 'AbortError') {
+        alert('Request timed out. The API may not be reachable. Please try again or check deployment logs.');
+      } else {
+        alert("Error generating images. See console for details.");
+      }
     } finally {
       setIsGenerating(false);
     }
