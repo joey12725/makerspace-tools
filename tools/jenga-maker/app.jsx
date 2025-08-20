@@ -81,6 +81,7 @@ function JengaConfigurator() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [zipUrl, setZipUrl] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [apiAlive, setApiAlive] = useState(null); // null = unknown, true/false
 
   // Menu/picker for click-to-move
   const [picker, setPicker] = useState(null); // { x, y, blockId, from }
@@ -226,6 +227,26 @@ function JengaConfigurator() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Ping API
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/ping");
+        setApiAlive(res.ok);
+      } catch {
+        setApiAlive(false);
+      }
+    })();
+  }, []);
+
+  const totalUploadBytes = useMemo(() => {
+    let sum = 0;
+    Object.values(uploads).forEach((arr) => {
+      (arr || []).forEach((f) => (sum += f.size || 0));
+    });
+    return sum;
+  }, [uploads]);
 
   // --- JSON copy/paste helpers ---
   function loadFromJsonText() {
@@ -707,6 +728,10 @@ function Block({ block, from }) {
           {zipUrl && (
             <a href={zipUrl} download="jenga-output.zip" className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-[#4a2c2a] shadow hover:bg-amber-50">Download ZIP</a>
           )}
+          <span className={`ml-2 inline-flex items-center gap-1 rounded-xl px-2 py-1 text-xs ${apiAlive===null?"bg-white/30 text-white/80":apiAlive?"bg-green-500/20 text-green-200":"bg-red-500/20 text-red-200"}`} title="API status">
+            <span className={`h-2 w-2 rounded-full ${apiAlive?"bg-green-400":"bg-red-400"}`} />
+            <span>{apiAlive===null?"Checking API…":apiAlive?"API Live":"API Down"}</span>
+          </span>
         </div>
       </div>
 
@@ -775,6 +800,12 @@ function Block({ block, from }) {
           </>
         )}
       </div>
+      {/* Upload size hint */}
+      {totalUploadBytes > 0 && (
+        <div className="mb-6 text-xs text-white/80">
+          Upload size: {(totalUploadBytes/1024/1024).toFixed(2)} MB{totalUploadBytes > 4.2*1024*1024 ? " • This may exceed serverless limits; try fewer/smaller images." : ""}
+        </div>
+      )}
       {/* Color Mode */}
       <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
         <div className="col-span-1 text-white">
