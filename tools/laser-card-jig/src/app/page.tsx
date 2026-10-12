@@ -1,500 +1,601 @@
-'use client';
+"use client";
 
-import { useState, useRef, useEffect } from 'react';
-import ReactCrop, { Crop, PixelCrop } from 'react-image-crop';
-import 'react-image-crop/dist/ReactCrop.css';
-import { calculateLayout, LayoutResult } from '@/lib/layoutAlgorithm';
-import { generateSTL } from '@/lib/stlGenerator';
-import { generatePNG } from '@/lib/pngGenerator';
-import { saveAs } from 'file-saver';
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { saveAs } from "file-saver";
+import {
+  buildPersistedConfig,
+  DEFAULT_DIMENSIONS,
+  DEFAULT_IMAGE_PROCESSING,
+  formatTimestampForFile,
+  parsePersistedConfig,
+} from "@/lib/config";
+import {
+  autoCropToAspect,
+  createProcessedArtworkCanvas,
+  drawScaledPreview,
+  drawSourcePreview,
+  normalizeImageProcessing,
+} from "@/lib/image-processing";
+import { calculateJigLayout, getJigOffsetOnLaserBed, MIN_EDGE_MARGIN_IN, MIN_WALL_THICKNESS_IN } from "@/lib/layout";
+import { buildLaserLayoutPngBlob, DEFAULT_OUTPUT_DPI } from "@/lib/png";
+import { buildJigStlBlob } from "@/lib/stl";
+import type { ImageProcessingConfig, JigDimensions, JigLayout } from "@/lib/types";
 
-interface Config {
-  laserBedWidth: number;
-  laserBedHeight: number;
-  jigWidth: number;
-  jigHeight: number;
-  cardWidth: number;
-  cardHeight: number;
-  cardTolerance: number;
-  grayscale: boolean;
-  blackPoint: number;
-  whitePoint: number;
+type Notice = {
+  level: "error" | "success";
+  message: string;
+};
+
+type NumberFieldProps = {
+  label: string;
+  value: number;
+  step?: number;
+  min?: number;
+  onChange: (nextValue: number) => void;
+};
+
+function NumberField({ label, value, step = 0.001, min = 0, onChange }: NumberFieldProps) {
+  return (
+    <label className="flex flex-col gap-1 text-sm font-medium text-slate-200">
+      <span>{label}</span>
+      <input
+        className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none ring-cyan-500 transition focus:ring"
+        type="number"
+        value={Number.isFinite(value) ? value : ""}
+        step={step}
+        min={min}
+        onChange={(event) => {
+          const parsed = Number(event.target.value);
+          if (Number.isFinite(parsed)) {
+            onChange(parsed);
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 export default function Home() {
-  const [config, setConfig] = useState<Config>({
-    laserBedWidth: 15.0,
-    laserBedHeight: 12.01,
-    jigWidth: 15.0,
-    jigHeight: 12.0,
-    cardWidth: 3.346,
-    cardHeight: 2.165,
-    cardTolerance: 0.02,
-    grayscale: true,
-    blackPoint: 0,
-    whitePoint: 255,
-  });
+  const [dimensions, setDimensions] = useState<JigDimensions>(DEFAULT_DIMENSIONS);
+  const [imageProcessing, setImageProcessing] = useState<ImageProcessingConfig>(DEFAULT_IMAGE_PROCESSING);
+  const [uploadedImage, setUploadedImage] = useState<HTMLImageElement | null>(null);
+  const [imageName, setImageName] = useState<string>("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
 
-  const [imageSrc, setImageSrc] = useState<string | null>(null);
-  const [crop, setCrop] = useState<Crop>();
-  const [completedCrop, setCompletedCrop] = useState<PixelCrop>();
-  const [layout, setLayout] = useState<LayoutResult | null>(null);
-  
-  const imgRef = useRef<HTMLImageElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const sourcePreviewRef = useRef<HTMLCanvasElement | null>(null);
+  const processedPreviewRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Recalculate layout when config changes
-  useEffect(() => {
-    const result = calculateLayout(
-      config.jigWidth,
-      config.jigHeight,
-      config.cardWidth,
-      config.cardHeight,
-      config.cardTolerance
-    );
-    setLayout(result);
-  }, [config.jigWidth, config.jigHeight, config.cardWidth, config.cardHeight, config.cardTolerance]);
-
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const reader = new FileReader();
-      reader.addEventListener('load', () => {
-        setImageSrc(reader.result?.toString() || null);
-      });
-      reader.readAsDataURL(e.target.files[0]);
+  const layoutResult = useMemo(() => {
+    try {
+      const layout = calculateJigLayout(dimensions);
+      const jigOffset = getJigOffsetOnLaserBed(dimensions);
+      return {
+        layout,
+        jigOffset,
+        error: "",
+      };
+    } catch (error) {
+      return {
+        layout: null,
+        jigOffset: null,
+        error: error instanceof Error ? error.message : "Layout calculation failed.",
+      };
     }
-  };
+  }, [dimensions]);
 
-  const updateConfig = (key: keyof Config, value: number | boolean) => {
-    setConfig((prev) => ({ ...prev, [key]: value }));
-  };
-
-  // Apply image processing to canvas
   useEffect(() => {
-    if (!completedCrop || !imgRef.current || !canvasRef.current) return;
-
-    const image = imgRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const scaleX = image.naturalWidth / image.width;
-    const scaleY = image.naturalHeight / image.height;
-
-    canvas.width = completedCrop.width;
-    canvas.height = completedCrop.height;
-
-    ctx.drawImage(
-      image,
-      completedCrop.x * scaleX,
-      completedCrop.y * scaleY,
-      completedCrop.width * scaleX,
-      completedCrop.height * scaleY,
-      0,
-      0,
-      completedCrop.width,
-      completedCrop.height
-    );
-
-    // Apply grayscale and black/white point adjustments
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-
-    for (let i = 0; i < data.length; i += 4) {
-      let r = data[i];
-      let g = data[i + 1];
-      let b = data[i + 2];
-
-      // Grayscale conversion
-      if (config.grayscale) {
-        const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-        r = g = b = gray;
-      }
-
-      // Black/white point adjustment
-      const range = config.whitePoint - config.blackPoint;
-      r = Math.max(0, Math.min(255, ((r - config.blackPoint) / range) * 255));
-      g = Math.max(0, Math.min(255, ((g - config.blackPoint) / range) * 255));
-      b = Math.max(0, Math.min(255, ((b - config.blackPoint) / range) * 255));
-
-      data[i] = r;
-      data[i + 1] = g;
-      data[i + 2] = b;
+    if (!uploadedImage || !sourcePreviewRef.current) {
+      return;
     }
 
-    ctx.putImageData(imageData, 0, 0);
-  }, [completedCrop, config.grayscale, config.blackPoint, config.whitePoint]);
+    drawSourcePreview(sourcePreviewRef.current, uploadedImage, imageProcessing);
+  }, [uploadedImage, imageProcessing]);
 
-  const handleGenerate = async () => {
-    if (!layout || !canvasRef.current) {
-      alert('Please ensure all parameters are set and an image is uploaded.');
+  useEffect(() => {
+    if (!uploadedImage || !processedPreviewRef.current) {
       return;
     }
 
     try {
-      // Generate STL
-      const stlBlob = generateSTL(
-        config.jigWidth,
-        config.jigHeight,
-        config.cardWidth,
-        config.cardHeight,
-        config.cardTolerance,
-        layout
-      );
-      saveAs(stlBlob, 'jig_template.stl');
+      const processedCanvas = createProcessedArtworkCanvas(uploadedImage, imageProcessing);
+      drawScaledPreview(processedPreviewRef.current, processedCanvas);
+    } catch {
+      // Keep the previous preview; validation is surfaced when generating.
+    }
+  }, [uploadedImage, imageProcessing]);
 
-      // Generate PNG
-      const pngBlob = await generatePNG(
-        config.laserBedWidth,
-        config.laserBedHeight,
-        config.cardWidth,
-        config.cardHeight,
-        layout,
-        canvasRef.current
-      );
-      saveAs(pngBlob, 'laser_layout.png');
+  const handleDimensionsChange = (key: keyof JigDimensions, nextValue: number) => {
+    setDimensions((previous) => ({
+      ...previous,
+      [key]: nextValue,
+    }));
+    setNotice(null);
+  };
 
-      // Generate JSON config
-      const configData = {
-        ...config,
-        timestamp: new Date().toISOString(),
-      };
-      const configBlob = new Blob([JSON.stringify(configData, null, 2)], {
-        type: 'application/json',
+  const handleImageSettingChange = (
+    key: keyof ImageProcessingConfig,
+    nextValue: number | boolean,
+  ) => {
+    setImageProcessing((previous) =>
+      normalizeImageProcessing({
+        ...previous,
+        [key]: nextValue,
+      }),
+    );
+    setNotice(null);
+  };
+
+  const handleCropBoundedUpdate = (
+    key: "cropXPercent" | "cropYPercent" | "cropWidthPercent" | "cropHeightPercent",
+    nextValue: number,
+  ) => {
+    setImageProcessing((previous) => {
+      const next = { ...previous, [key]: nextValue };
+
+      if (key === "cropXPercent") {
+        next.cropXPercent = clamp(next.cropXPercent, 0, 99);
+        next.cropWidthPercent = Math.min(next.cropWidthPercent, 100 - next.cropXPercent);
+      }
+
+      if (key === "cropYPercent") {
+        next.cropYPercent = clamp(next.cropYPercent, 0, 99);
+        next.cropHeightPercent = Math.min(next.cropHeightPercent, 100 - next.cropYPercent);
+      }
+
+      if (key === "cropWidthPercent") {
+        next.cropWidthPercent = clamp(next.cropWidthPercent, 1, 100 - next.cropXPercent);
+      }
+
+      if (key === "cropHeightPercent") {
+        next.cropHeightPercent = clamp(next.cropHeightPercent, 1, 100 - next.cropYPercent);
+      }
+
+      return normalizeImageProcessing(next);
+    });
+  };
+
+  const handleImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+
+    image.onload = () => {
+      setUploadedImage(image);
+      setImageName(file.name);
+      setNotice({ level: "success", message: `Loaded image: ${file.name}` });
+
+      setImageProcessing((previous) => {
+        const autoCrop = autoCropToAspect(
+          image.naturalWidth,
+          image.naturalHeight,
+          dimensions.cardWidthIn / dimensions.cardHeightIn,
+        );
+
+        return normalizeImageProcessing({
+          ...previous,
+          ...autoCrop,
+        });
       });
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      saveAs(configBlob, `config_${timestamp}.json`);
 
-      alert('Files generated successfully!');
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    image.onerror = () => {
+      setNotice({ level: "error", message: "Could not decode this image file." });
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    image.src = objectUrl;
+
+    event.target.value = "";
+  };
+
+  const handleAutoCrop = () => {
+    if (!uploadedImage) {
+      return;
+    }
+
+    const autoCrop = autoCropToAspect(
+      uploadedImage.naturalWidth,
+      uploadedImage.naturalHeight,
+      dimensions.cardWidthIn / dimensions.cardHeightIn,
+    );
+
+    setImageProcessing((previous) =>
+      normalizeImageProcessing({
+        ...previous,
+        ...autoCrop,
+      }),
+    );
+  };
+
+  const handleConfigFileLoad = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = parsePersistedConfig(text);
+      setDimensions(parsed.dimensions);
+      setImageProcessing(parsed.imageProcessing);
+      setNotice({
+        level: "success",
+        message: `Loaded config from ${file.name}.`,
+      });
     } catch (error) {
-      console.error('Error generating files:', error);
-      alert('Failed to generate files. Check console for details.');
+      setNotice({
+        level: "error",
+        message: error instanceof Error ? error.message : "Failed to read config file.",
+      });
+    } finally {
+      event.target.value = "";
     }
   };
 
-  const handleConfigUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const reader = new FileReader();
-      reader.addEventListener('load', () => {
-        try {
-          const loadedConfig = JSON.parse(reader.result as string);
-          // Remove timestamp before setting
-          const { timestamp, ...configWithoutTimestamp } = loadedConfig;
-          setConfig(configWithoutTimestamp);
-        } catch (error) {
-          alert('Failed to load configuration file.');
-          console.error(error);
-        }
+  const handleDownloadConfig = () => {
+    const normalized = normalizeImageProcessing(imageProcessing);
+    const persisted = buildPersistedConfig(dimensions, normalized);
+    const blob = new Blob([JSON.stringify(persisted, null, 2)], {
+      type: "application/json",
+    });
+
+    saveAs(blob, `config_${formatTimestampForFile()}.json`);
+    setNotice({ level: "success", message: "Downloaded configuration JSON." });
+  };
+
+  const handleGenerateAll = async () => {
+    if (!uploadedImage) {
+      setNotice({ level: "error", message: "Upload an image before generating outputs." });
+      return;
+    }
+
+    if (!layoutResult.layout) {
+      setNotice({ level: "error", message: layoutResult.error });
+      return;
+    }
+
+    setIsGenerating(true);
+    setNotice(null);
+
+    try {
+      const normalized = normalizeImageProcessing(imageProcessing);
+      setImageProcessing(normalized);
+
+      const processedCanvas = createProcessedArtworkCanvas(uploadedImage, normalized);
+      const stlBlob = buildJigStlBlob(layoutResult.layout, dimensions);
+      const pngBlob = await buildLaserLayoutPngBlob({
+        dimensions,
+        layout: layoutResult.layout,
+        processedArtwork: processedCanvas,
       });
-      reader.readAsText(e.target.files[0]);
+
+      const persisted = buildPersistedConfig(dimensions, normalized);
+      const configBlob = new Blob([JSON.stringify(persisted, null, 2)], {
+        type: "application/json",
+      });
+
+      saveAs(stlBlob, "jig_template.stl");
+      saveAs(pngBlob, "laser_layout.png");
+      saveAs(configBlob, `config_${formatTimestampForFile()}.json`);
+
+      setNotice({
+        level: "success",
+        message: "Generated jig_template.stl, laser_layout.png, and config JSON.",
+      });
+    } catch (error) {
+      setNotice({
+        level: "error",
+        message: error instanceof Error ? error.message : "Generation failed.",
+      });
+    } finally {
+      setIsGenerating(false);
     }
   };
 
   return (
-    <div className="min-h-screen p-8">
-      <div className="max-w-7xl mx-auto">
-        <h1 className="text-4xl font-bold mb-8 text-gray-800">
-          Laser Card Jig Generator
-        </h1>
+    <div className="min-h-screen bg-slate-950 px-4 py-8 text-slate-100 sm:px-8">
+      <main className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+        <section className="rounded-xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
+          <h1 className="text-2xl font-bold tracking-tight">Bulk Laser Engraving Card Jig Generator</h1>
+          <p className="mt-2 text-sm text-slate-300">
+            Configure card geometry, process artwork, then generate all production files in one click.
+          </p>
+        </section>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Left Column: Configuration */}
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">
-                Dimensions
-              </h2>
+        <div className="grid gap-6 lg:grid-cols-[1.35fr_1fr]">
+          <section className="space-y-6 rounded-xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
+            <div>
+              <h2 className="text-lg font-semibold">Dimensions & Constraints (inches)</h2>
+              <p className="text-sm text-slate-400">
+                Minimum wall and edge constraints are fixed at {MIN_WALL_THICKNESS_IN.toFixed(3)} in and{" "}
+                {MIN_EDGE_MARGIN_IN.toFixed(3)} in.
+              </p>
+            </div>
 
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Laser Bed Width (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={config.laserBedWidth}
-                    onChange={(e) =>
-                      updateConfig('laserBedWidth', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <NumberField
+                label="Laser Bed Width"
+                value={dimensions.laserBedWidthIn}
+                onChange={(value) => handleDimensionsChange("laserBedWidthIn", value)}
+              />
+              <NumberField
+                label="Laser Bed Height"
+                value={dimensions.laserBedHeightIn}
+                onChange={(value) => handleDimensionsChange("laserBedHeightIn", value)}
+              />
+              <NumberField
+                label="Jig Width"
+                value={dimensions.jigWidthIn}
+                onChange={(value) => handleDimensionsChange("jigWidthIn", value)}
+              />
+              <NumberField
+                label="Jig Height"
+                value={dimensions.jigHeightIn}
+                onChange={(value) => handleDimensionsChange("jigHeightIn", value)}
+              />
+              <NumberField
+                label="Card Width"
+                value={dimensions.cardWidthIn}
+                onChange={(value) => handleDimensionsChange("cardWidthIn", value)}
+              />
+              <NumberField
+                label="Card Height"
+                value={dimensions.cardHeightIn}
+                onChange={(value) => handleDimensionsChange("cardHeightIn", value)}
+              />
+              <NumberField
+                label="Card Tolerance"
+                value={dimensions.toleranceIn}
+                onChange={(value) => handleDimensionsChange("toleranceIn", value)}
+              />
+            </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Laser Bed Height (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={config.laserBedHeight}
-                    onChange={(e) =>
-                      updateConfig('laserBedHeight', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Jig Width (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={config.jigWidth}
-                    onChange={(e) =>
-                      updateConfig('jigWidth', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Jig Height (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={config.jigHeight}
-                    onChange={(e) =>
-                      updateConfig('jigHeight', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Card Width (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    value={config.cardWidth}
-                    onChange={(e) =>
-                      updateConfig('cardWidth', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Card Height (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    value={config.cardHeight}
-                    onChange={(e) =>
-                      updateConfig('cardHeight', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Card Tolerance (in)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    value={config.cardTolerance}
-                    onChange={(e) =>
-                      updateConfig('cardTolerance', parseFloat(e.target.value))
-                    }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
+            <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+              <h3 className="text-sm font-semibold text-slate-200">Artwork Input</h3>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <label className="inline-flex cursor-pointer items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-medium text-slate-100 hover:border-cyan-500">
+                  Upload Image
+                  <input className="hidden" type="file" accept="image/*" onChange={handleImageUpload} />
+                </label>
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-medium text-slate-100 hover:border-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={handleAutoCrop}
+                  disabled={!uploadedImage}
+                >
+                  Auto Crop to Card Ratio
+                </button>
+                {imageName ? <span className="text-sm text-cyan-300">{imageName}</span> : null}
               </div>
             </div>
 
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">
-                Image Processing
-              </h2>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="flex items-center gap-2 rounded-md border border-slate-800 bg-slate-950/40 p-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={imageProcessing.grayscale}
+                  onChange={(event) => handleImageSettingChange("grayscale", event.target.checked)}
+                />
+                Grayscale
+              </label>
 
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Upload Image
-                  </label>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={handleImageUpload}
-                    className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                  />
-                </div>
+              <label className="flex flex-col gap-2 rounded-md border border-slate-800 bg-slate-950/40 p-3 text-sm">
+                <span className="font-medium">Black Point: {imageProcessing.blackPoint}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={254}
+                  value={imageProcessing.blackPoint}
+                  onChange={(event) =>
+                    handleImageSettingChange("blackPoint", Number(event.target.value))
+                  }
+                />
+              </label>
 
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="grayscale"
-                    checked={config.grayscale}
-                    onChange={(e) => updateConfig('grayscale', e.target.checked)}
-                    className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                  />
-                  <label
-                    htmlFor="grayscale"
-                    className="text-sm font-medium text-gray-700"
-                  >
-                    Grayscale
-                  </label>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Black Point ({config.blackPoint})
-                  </label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="255"
-                    value={config.blackPoint}
-                    onChange={(e) =>
-                      updateConfig('blackPoint', parseInt(e.target.value))
-                    }
-                    className="w-full"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    White Point ({config.whitePoint})
-                  </label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="255"
-                    value={config.whitePoint}
-                    onChange={(e) =>
-                      updateConfig('whitePoint', parseInt(e.target.value))
-                    }
-                    className="w-full"
-                  />
-                </div>
-              </div>
+              <label className="flex flex-col gap-2 rounded-md border border-slate-800 bg-slate-950/40 p-3 text-sm">
+                <span className="font-medium">White Point: {imageProcessing.whitePoint}</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={255}
+                  value={imageProcessing.whitePoint}
+                  onChange={(event) =>
+                    handleImageSettingChange("whitePoint", Number(event.target.value))
+                  }
+                />
+              </label>
             </div>
 
-            {layout && (
-              <div className="bg-white p-6 rounded-lg shadow">
-                <h2 className="text-2xl font-semibold mb-4 text-gray-700">
-                  Layout Preview
-                </h2>
-                <div className="space-y-2 text-sm">
-                  <p>
-                    <strong>Cards (X × Y):</strong> {layout.cardsX} × {layout.cardsY} ={' '}
-                    {layout.cardsX * layout.cardsY} total
-                  </p>
-                  <p>
-                    <strong>Horizontal Gap:</strong> {layout.horizontalGap.toFixed(3)}&quot;
-                  </p>
-                  <p>
-                    <strong>Vertical Gap:</strong> {layout.verticalGap.toFixed(3)}&quot;
-                  </p>
-                  <p>
-                    <strong>Edge Margin X:</strong> {layout.edgeMarginX.toFixed(3)}&quot;
-                  </p>
-                  <p>
-                    <strong>Edge Margin Y:</strong> {layout.edgeMarginY.toFixed(3)}&quot;
-                  </p>
-                  {(layout.edgeMarginX < 0.125 ||
-                    layout.edgeMarginY < 0.125 ||
-                    layout.horizontalGap < 0.125 ||
-                    layout.verticalGap < 0.125) && (
-                    <p className="text-red-600 font-semibold mt-2">
-                      ⚠️ Warning: Some constraints are below minimum (1/8&quot;)
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
+            <div className="grid gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-4">
+              <h3 className="text-sm font-semibold text-slate-200">Crop Controls (% of source image)</h3>
 
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">
-                Configuration
-              </h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Load Configuration
-                  </label>
-                  <input
-                    type="file"
-                    accept=".json"
-                    onChange={handleConfigUpload}
-                    className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100"
-                  />
-                </div>
-              </div>
+              <label className="flex flex-col gap-1 text-sm">
+                <span>Crop X: {imageProcessing.cropXPercent.toFixed(1)}%</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={99}
+                  step={0.1}
+                  value={imageProcessing.cropXPercent}
+                  onChange={(event) =>
+                    handleCropBoundedUpdate("cropXPercent", Number(event.target.value))
+                  }
+                />
+              </label>
+
+              <label className="flex flex-col gap-1 text-sm">
+                <span>Crop Y: {imageProcessing.cropYPercent.toFixed(1)}%</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={99}
+                  step={0.1}
+                  value={imageProcessing.cropYPercent}
+                  onChange={(event) =>
+                    handleCropBoundedUpdate("cropYPercent", Number(event.target.value))
+                  }
+                />
+              </label>
+
+              <label className="flex flex-col gap-1 text-sm">
+                <span>Crop Width: {imageProcessing.cropWidthPercent.toFixed(1)}%</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  step={0.1}
+                  value={imageProcessing.cropWidthPercent}
+                  onChange={(event) =>
+                    handleCropBoundedUpdate("cropWidthPercent", Number(event.target.value))
+                  }
+                />
+              </label>
+
+              <label className="flex flex-col gap-1 text-sm">
+                <span>Crop Height: {imageProcessing.cropHeightPercent.toFixed(1)}%</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  step={0.1}
+                  value={imageProcessing.cropHeightPercent}
+                  onChange={(event) =>
+                    handleCropBoundedUpdate("cropHeightPercent", Number(event.target.value))
+                  }
+                />
+              </label>
             </div>
-          </div>
+          </section>
 
-          {/* Right Column: Image Preview */}
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h2 className="text-2xl font-semibold mb-4 text-gray-700">
-                Image Preview
-              </h2>
+          <section className="space-y-6 rounded-xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
+            <h2 className="text-lg font-semibold">Layout & Previews</h2>
 
-              {imageSrc && (
-                <div className="space-y-4">
-                  <div className="border border-gray-300 rounded-md overflow-hidden">
-                    <ReactCrop
-                      crop={crop}
-                      onChange={(c) => setCrop(c)}
-                      onComplete={(c) => setCompletedCrop(c)}
-                      aspect={config.cardWidth / config.cardHeight}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        ref={imgRef}
-                        src={imageSrc}
-                        alt="Upload"
-                        className="max-w-full"
-                      />
-                    </ReactCrop>
-                  </div>
-
-                  <div>
-                    <h3 className="text-lg font-semibold mb-2 text-gray-700">
-                      Processed Preview
-                    </h3>
-                    <canvas
-                      ref={canvasRef}
-                      className="border border-gray-300 rounded-md max-w-full"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {!imageSrc && (
-                <div className="flex items-center justify-center h-64 bg-gray-100 rounded-md">
-                  <p className="text-gray-500">Upload an image to begin</p>
-                </div>
+            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-sm">
+              {layoutResult.layout && layoutResult.jigOffset ? (
+                <LayoutSummary
+                  layout={layoutResult.layout}
+                  dimensions={dimensions}
+                  offsetX={layoutResult.jigOffset.offsetXIn}
+                  offsetY={layoutResult.jigOffset.offsetYIn}
+                />
+              ) : (
+                <p className="text-red-300">{layoutResult.error}</p>
               )}
             </div>
-          </div>
-        </div>
 
-        {/* Generate Button */}
-        <div className="mt-8 flex justify-center">
-          <button
-            onClick={handleGenerate}
-            disabled={!imageSrc || !completedCrop || !layout}
-            className="px-8 py-3 bg-blue-600 text-white font-semibold rounded-lg shadow-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-          >
-            Generate All Files (STL + PNG + JSON)
-          </button>
+            <div className="grid gap-4">
+              <div>
+                <p className="mb-2 text-sm font-medium text-slate-300">Source + Crop</p>
+                <canvas
+                  ref={sourcePreviewRef}
+                  width={540}
+                  height={320}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950"
+                />
+              </div>
+
+              <div>
+                <p className="mb-2 text-sm font-medium text-slate-300">Processed Artwork Preview</p>
+                <canvas
+                  ref={processedPreviewRef}
+                  width={540}
+                  height={320}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                className="rounded-md border border-cyan-400 bg-cyan-500/20 px-4 py-2 text-sm font-semibold text-cyan-200 hover:bg-cyan-500/30 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={handleGenerateAll}
+                disabled={isGenerating}
+              >
+                {isGenerating ? "Generating..." : "Generate STL + PNG + JSON"}
+              </button>
+
+              <button
+                type="button"
+                className="rounded-md border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-100 hover:border-cyan-500"
+                onClick={handleDownloadConfig}
+              >
+                Download JSON Config
+              </button>
+
+              <label className="inline-flex cursor-pointer items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-100 hover:border-cyan-500 sm:col-span-2">
+                Load JSON Config
+                <input className="hidden" type="file" accept="application/json" onChange={handleConfigFileLoad} />
+              </label>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              PNG output is generated at {DEFAULT_OUTPUT_DPI} DPI with canvas dimensions matching the full laser bed.
+            </p>
+
+            {notice ? (
+              <p
+                className={`rounded-md border p-3 text-sm ${
+                  notice.level === "error"
+                    ? "border-red-500/40 bg-red-950/50 text-red-200"
+                    : "border-emerald-500/40 bg-emerald-950/40 text-emerald-200"
+                }`}
+              >
+                {notice.message}
+              </p>
+            ) : null}
+          </section>
         </div>
-      </div>
+      </main>
+    </div>
+  );
+}
+
+function LayoutSummary({
+  layout,
+  dimensions,
+  offsetX,
+  offsetY,
+}: {
+  layout: JigLayout;
+  dimensions: JigDimensions;
+  offsetX: number;
+  offsetY: number;
+}) {
+  return (
+    <div className="space-y-2 text-slate-200">
+      <p>
+        Cards: <span className="font-semibold">{layout.columns * layout.rows}</span> ({layout.columns} columns x {layout.rows} rows)
+      </p>
+      <p>
+        Pocket Size (Card + Tolerance): {layout.pocketWidthIn.toFixed(3)} in x {layout.pocketHeightIn.toFixed(3)} in
+      </p>
+      <p>
+        X-axis wall / edge: {layout.axisX.wallThicknessIn.toFixed(3)} in / {layout.axisX.edgeMarginIn.toFixed(3)} in
+      </p>
+      <p>
+        Y-axis wall / edge: {layout.axisY.wallThicknessIn.toFixed(3)} in / {layout.axisY.edgeMarginIn.toFixed(3)} in
+      </p>
+      <p>
+        Jig center offset on laser bed: X {offsetX.toFixed(3)} in, Y {offsetY.toFixed(3)} in
+      </p>
+      <p>
+        Thickness profile: 0.125 in base + 0.125 in wall grid = 0.250 in max height, with 0.125 in pocket depth.
+      </p>
+      <p>
+        STL pocket dimensions use card tolerance ({dimensions.toleranceIn.toFixed(3)} in) in both axes.
+      </p>
     </div>
   );
 }
