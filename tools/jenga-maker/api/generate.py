@@ -24,7 +24,9 @@ def _norm_cat(name: str) -> str:
     return re.sub(r"[\s_-]+", "", (name or "").strip().lower())
 
 
+# "/" for the local dev server mount, "/api/generate" for Vercel, which passes the full path.
 @app.post("/")
+@app.post("/api/generate")
 def generate():
     if mj is None:
         return jsonify({"error": "make_jenga_layout.py not importable"}), 500
