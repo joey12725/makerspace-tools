@@ -1,68 +1,57 @@
-# Laser Card Jig Generator
+# Laser Card Jig
 
-Next.js + TailwindCSS app for generating a bulk laser engraving card jig workflow:
-- `jig_template.stl` (3D printable alignment tray)
-- `laser_layout.png` (laser bed image layout)
-- `config_[timestamp].json` (re-loadable settings)
+Engrave a whole bed of cards in one pass. Type in your laser bed and card size, drop in the artwork, and the app hands back three files that line up to the thousandth of an inch:
 
-## Stack
-- Next.js (App Router, TypeScript, `src/` layout)
-- TailwindCSS
-- Client-side STL geometry: `@jscad/modeling` + `@jscad/stl-serializer`
-- Client-side image processing and PNG generation: HTML5 Canvas
-- Download handling: `file-saver`
-- Unit testing: Vitest
+- **`jig_template.stl`**: a 3D-printable tray with one pocket per card
+- **`laser_layout.png`**: a full-bed, 300 DPI image with the artwork placed exactly over every pocket
+- **`config_<timestamp>.json`**: every setting, so you can reload the job next month
 
-## Project Bootstrap
-Scaffold command used for this project:
+![Laser Card Jig app with sample artwork loaded](../../docs/gallery/laser-card-jig.png)
+
+Everything runs in the browser. No server, no uploads.
+
+## Quickstart
 
 ```bash
-npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir --use-npm
+cd tools/laser-card-jig
+npm ci
+npm run dev        # http://localhost:3000
 ```
 
-## Default Configuration
-- Laser max bed: `15.00 in x 12.01 in`
-- Center jig bed: `15.00 in x 12.00 in`
-- Card size: `3.346 in x 2.165 in`
-- Min wall thickness: `1/8 in`
-- Min edge margin: `1/8 in`
+Click **Upload Image**, pick `samples/card-art.png`, then **Generate STL + PNG + JSON**. Print the STL, set it on the bed, load the PNG in LightBurn (or any laser software) at the bed's full size, and fire.
+
+With the default 15 x 12 in bed and 85 x 55 mm cards you get a 4 x 4 grid of 16 cards:
+
+![Generated laser layout](docs/laser-layout.png)
 
 ## Features
-- Image upload
-- Crop controls (x/y/width/height)
-- Grayscale toggle
-- Black point / white point level sliders
-- Layout auto-sizing to maximize card count while enforcing minimum wall/edge rules
-- JSON config download and upload (state restore)
-- STL/PNG/JSON generation on one action
 
-## Development
+- **Pocket packing** that maximizes the card count per axis while keeping every wall and outer edge at least 1/8 in thick
+- **Tolerance** added to each pocket so cards drop in without forcing
+- **Artwork tools**: crop by percentage, auto-crop to the card's aspect ratio, grayscale, black point and white point levels
+- **Exact registration**: the PNG uses the same slot coordinates as the STL, offset to the center of the laser bed
+- **Save and restore** the full configuration as JSON
 
-```bash
-npm install
-npm run dev
-```
+## How it works
 
-Open `http://localhost:3000`.
+| Module | Job |
+| --- | --- |
+| `src/lib/layout.ts` | For each axis, start from the most cards that fit and step down until wall and edge minimums hold. Produces the slot grid in inches. |
+| `src/lib/stl.ts` | Builds a 1/8 in base plate plus a 1/8 in wall grid with `@jscad/modeling` CSG, then serializes binary STL. |
+| `src/lib/image-processing.ts` | Crop and level adjustments on an HTML canvas. |
+| `src/lib/png.ts` | Paints the processed artwork into every slot on a bed-sized canvas. |
+| `src/lib/config.ts` | Defaults plus a forgiving JSON loader that falls back to defaults for anything missing or malformed. |
 
-## Quality Checks
+The original design spec lives in [docs/spec.md](docs/spec.md).
+
+## Checks
 
 ```bash
 npm run lint
-npm run test
+npm test           # layout math, STL geometry, config round trip
 npm run build
 ```
 
-## Vercel Deployment
+## Stack
 
-```bash
-npm i -g vercel
-vercel
-vercel --prod
-```
-
-If your project is already linked, you can use:
-
-```bash
-vercel --prod --yes
-```
+Next.js 16 (App Router), React 19, Tailwind CSS 4, TypeScript, `@jscad/modeling`, Vitest. Deploys as a static site on Vercel or anywhere else.
