@@ -1,0 +1,39 @@
+[project]
+name = "makerspace-tools"
+version = "1.0.0"
+description = "Small fabrication tools for laser engravers, 3D printers and lithophanes."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Joey Hersh" }]
+requires-python = ">=3.10"
+dependencies = [
+    "pillow>=10.0",
+    "numpy>=1.24",
+    "flask>=3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+ui = [
+    "streamlit>=1.50",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tools/jenga-maker/tests", "tools/lithophane-tiler/tests", "tools/longboard-griptape/tests"]
+pythonpath = ["tools/jenga-maker", "tools/lithophane-tiler", "tools/longboard-griptape"]
+addopts = "--import-mode=importlib"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["tools/laser-card-jig"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]

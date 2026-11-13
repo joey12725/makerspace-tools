@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node (per-tool ignores live next to package.json)
+node_modules/
+
+# Tool output
+output/
+lithophane_sheet.png
+griptape_preview.png
+
+# Local
+.env
+.env.*
+.DS_Store
+.vercel
+sheet.png
+preview.png
