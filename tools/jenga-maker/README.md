@@ -24,7 +24,7 @@ uv run python make_jenga_layout.py build --root examples --out output
 
 ### Web app
 
-There is also a drag-and-drop configurator: paste prompts, sort them into categories, set dots and colors, upload icons and fonts, and download the whole job as a ZIP.
+There is also a drag-and-drop configurator, live at [jenga-maker.vercel.app](https://jenga-maker.vercel.app): paste prompts, sort them into categories, set dots and colors, upload icons and fonts, and download the whole job as a ZIP.
 
 ```bash
 uv run python serve.py          # http://localhost:5050

@@ -13,7 +13,7 @@ Four small tools that get artwork from the screen onto a laser bed or a 3D print
 
 ### [Jenga Maker](tools/jenga-maker)
 
-A list of prompts goes in. Out come laser-ready sheets of block faces with titles, auto-fitted text, icons and category dots, plus a cut template that holds 40 blocks in register.
+A list of prompts goes in. Out come laser-ready sheets of block faces with titles, auto-fitted text, icons and category dots, plus a cut template that holds 40 blocks in register. [Try the web app.](https://jenga-maker.vercel.app)
 
 <a href="tools/jenga-maker"><img src="docs/gallery/jenga-maker.png" alt="Jenga Maker engrave sheet"></a>
 
