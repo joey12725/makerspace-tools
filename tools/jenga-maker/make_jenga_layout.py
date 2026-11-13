@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
-make_jenga_layout.py — TILE-RASTER RENDERER (clean icons, no text overlap)
+make_jenga_layout.py: laser-ready sheets for personalized Jenga blocks.
 
-What’s fixed
-  • No rectangles on raster pages.
-  • Title/subtitle never overlap (uses real text bbox).
-  • Icons: no gray haze; opaque white backgrounds become transparent (configurable threshold).
-  • If an icon already has proper transparency, it stays crisp (no reprocessing).
-  • Fonts: auto-use title.ttf / subtitle.ttf from project root (or pass via flags).
-  • Dots render below the icon, centered within the icon column, with reserved height so the image cannot overlap them.
+Reads a blocks.json of categories -> prompts (e.g. "*Title* subtitle text"),
+renders one tile per block face (title, auto-fitted subtitle, optional icon and
+category dots), packs the tiles onto laser-bed-sized pages and writes a cut
+template so the blocks line up under the laser.
 
-Usage (same as before). Optional tuning:
-  --icon-white-threshold 200   # 0..255: >= threshold -> transparent (try 200–230, or ~128 for half-way)
-  --title-sub-gap-mm 0.6       # vertical gap below title
-  --dot-vgap-mm 0.6            # vertical gap between icon bottom and dots
+    python make_jenga_layout.py check-images --root examples
+    python make_jenga_layout.py build --root examples --out output
 
-Dependencies:
-  pip install pillow
+Outputs: template.svg/png (alignment jig), raster_page_NN.svg/png (engrave
+sheets) and tiles/tile_NNN.png (individual faces).
+
+Useful tuning flags:
+  --icon-white-threshold 200   0..255: opaque icon pixels this light become transparent
+  --title-sub-gap-mm 0.6       vertical gap below the title
+  --dot-vgap-mm 0.6            vertical gap between icon bottom and dots
 """
 
 from __future__ import annotations
@@ -32,28 +31,32 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 # -----------------------------
 # Units & conversions
 # -----------------------------
 MM_PER_INCH = 25.4
 
+
 def mm_to_px_img(mm: float, dpi: int) -> int:
     return int(round(mm * dpi / MM_PER_INCH))
+
 
 # -----------------------------
 # Defaults
 # -----------------------------
-CATEGORY_DEFAULT_DOTS = {
-    "drinking": 1,
-    "truth": 2,
-    "dare": 3,
-    "spicy": 4,
-}
+# Optional per-category dot overrides (lowercase category -> dot count).
+# Categories without an entry get dots by position: first category 1, second 2, ...
+CATEGORY_DEFAULT_DOTS: dict[str, int] = {}
 TITLE_PATTERN = re.compile(r"\*(.*?)\*")  # *Title* capture
+
+# Bundled OFL fonts, used when the project root has no title/subtitle font of its own.
+BUNDLED_FONTS = Path(__file__).resolve().parent / "fonts"
+BUNDLED_TITLE_FONT = BUNDLED_FONTS / "BagelFatOne-Regular.ttf"
+BUNDLED_SUBTITLE_FONT = BUNDLED_FONTS / "NataSans-Variable.ttf"
+
 
 # -----------------------------
 # Data structures
@@ -64,8 +67,9 @@ class BlockItem:
     title: str
     subtitle: str
     dot_count: int
-    image_path: Optional[Path]
+    image_path: Path | None
     expected_image_name: str
+
 
 @dataclass
 class LayoutParams:
@@ -77,7 +81,7 @@ class LayoutParams:
     page_margin: float
     raster_margin: float
     template_tol: float
-    title_size_mm: Optional[float]
+    title_size_mm: float | None
     title_sub_gap_mm: float
     dot_diam_mm: float
     dot_gap_mm: float
@@ -89,21 +93,22 @@ class LayoutParams:
     icon_white_threshold: int  # 0..255
     # Color mode (optional)
     color_mode: bool = False
-    title_rgb: Optional[Tuple[int, int, int]] = None
-    subtitle_rgb: Optional[Tuple[int, int, int]] = None
+    title_rgb: tuple[int, int, int] | None = None
+    subtitle_rgb: tuple[int, int, int] | None = None
     background_style: str = "none"  # none|solid|per-category|gradient
-    background_rgb: Optional[Tuple[int, int, int]] = None
-    background_per_category: Optional[Dict[str, Tuple[int, int, int]]] = None
-    background_grad_0: Optional[Tuple[int, int, int]] = None
-    background_grad_1: Optional[Tuple[int, int, int]] = None
+    background_rgb: tuple[int, int, int] | None = None
+    background_per_category: dict[str, tuple[int, int, int]] | None = None
+    background_grad_0: tuple[int, int, int] | None = None
+    background_grad_1: tuple[int, int, int] | None = None
     # Dots options
     dots_enabled: bool = True
-    dot_rgb: Optional[Tuple[int, int, int]] = None
+    dot_rgb: tuple[int, int, int] | None = None
+
 
 # -----------------------------
 # Files & JSON
 # -----------------------------
-def parse_dot_map(arg: Optional[str]) -> Dict[str, int]:
+def parse_dot_map(arg: str | None) -> dict[str, int]:
     if not arg:
         return dict(CATEGORY_DEFAULT_DOTS)
     res = dict(CATEGORY_DEFAULT_DOTS)
@@ -117,18 +122,19 @@ def parse_dot_map(arg: Optional[str]) -> Dict[str, int]:
             pass
     return res
 
-def parse_blocks_json(root: Path, json_name: str, dot_map: Dict[str, int]) -> List[BlockItem]:
+
+def parse_blocks_json(root: Path, json_name: str, dot_map: dict[str, int]) -> list[BlockItem]:
     path = root / json_name
     if not path.exists():
         raise FileNotFoundError(f"Could not find {json_name} at {root}")
     data = json.loads(path.read_text(encoding="utf-8"))
 
-    items: List[BlockItem] = []
-    for cat_key, arr in data.items():
+    items: list[BlockItem] = []
+    for index, (cat_key, arr) in enumerate(data.items(), start=1):
         cat = cat_key.strip().lower()
-        dots = dot_map.get(cat, 1)
+        dots = dot_map.get(cat, index)
         # track per-category counts for the sanitized first word
-        name_counts: Dict[str, int] = {}
+        name_counts: dict[str, int] = {}
         for raw in arr:
             s = raw.strip()
             m = TITLE_PATTERN.search(s)
@@ -137,7 +143,7 @@ def parse_blocks_json(root: Path, json_name: str, dot_map: Dict[str, int]) -> Li
                 subtitle = s
             else:
                 title = m.group(1).strip()
-                subtitle = s[m.end():].strip()
+                subtitle = s[m.end() :].strip()
             base = sanitize_first_word_for_filename(title)
             cnt = name_counts.get(base, 0) + 1
             name_counts[base] = cnt
@@ -146,6 +152,7 @@ def parse_blocks_json(root: Path, json_name: str, dot_map: Dict[str, int]) -> Li
             items.append(BlockItem(cat, title, subtitle, dots, img_path, expected_name))
     return items
 
+
 # -----------------------------
 # Icon helpers
 # -----------------------------
@@ -153,7 +160,8 @@ def sanitize_first_word_for_filename(title: str) -> str:
     first = title.strip().split()[0] if title.strip() else ""
     return re.sub(r"[^A-Za-z0-9]+", "", first).lower()
 
-def find_category_dir(root: Path, category: str) -> Optional[Path]:
+
+def find_category_dir(root: Path, category: str) -> Path | None:
     for p in root.iterdir():
         if p.is_dir():
             norm = re.sub(r"[\s_-]+", "", p.name.strip().lower())
@@ -161,7 +169,8 @@ def find_category_dir(root: Path, category: str) -> Optional[Path]:
                 return p
     return None
 
-def find_image_for_block(root: Path, category: str, title: str, occurrence: int = 1) -> Optional[Path]:
+
+def find_image_for_block(root: Path, category: str, title: str, occurrence: int = 1) -> Path | None:
     """Find image file for a block within the given category.
 
     The lookup is based on the sanitized first word. For the first occurrence we
@@ -176,6 +185,7 @@ def find_image_for_block(root: Path, category: str, title: str, occurrence: int 
     if p.exists() and p.is_file():
         return p
     return None
+
 
 def icon_to_black_clean(im: Image.Image, white_threshold: int = 245) -> Image.Image:
     """
@@ -204,14 +214,15 @@ def icon_to_black_clean(im: Image.Image, white_threshold: int = 245) -> Image.Im
 
     return Image.merge("RGBA", (r, g, b, mask))
 
+
 # -----------------------------
 # Color helpers
 # -----------------------------
-def parse_hex_color(s: Optional[str]) -> Optional[Tuple[int, int, int]]:
+def parse_hex_color(s: str | None) -> tuple[int, int, int] | None:
     if not s or not isinstance(s, str):
         return None
     x = s.strip()
-    if x.startswith('#'):
+    if x.startswith("#"):
         x = x[1:]
     if len(x) == 3:
         try:
@@ -228,17 +239,19 @@ def parse_hex_color(s: Optional[str]) -> Optional[Tuple[int, int, int]]:
             return None
     return None
 
+
 # -----------------------------
 # Font helpers (Pillow)
 # -----------------------------
-def autofind_font(root: Path, candidates: List[str]) -> Optional[Path]:
+def autofind_font(root: Path, candidates: list[str]) -> Path | None:
     for name in candidates:
         p = root / name
         if p.exists():
             return p
     return None
 
-def load_font(path: Optional[Path], size_px: int) -> ImageFont.FreeTypeFont:
+
+def load_font(path: Path | None, size_px: int) -> ImageFont.FreeTypeFont:
     if path and path.exists():
         try:
             return ImageFont.truetype(str(path), size_px)
@@ -247,6 +260,7 @@ def load_font(path: Optional[Path], size_px: int) -> ImageFont.FreeTypeFont:
     # fallback to DejaVuSans (bundled with Pillow) to avoid tiny bitmap font
     try:
         from PIL import __file__ as pil_file
+
         pil_dir = Path(pil_file).parent
         djv = pil_dir / "fonts" / "DejaVuSans.ttf"
         if djv.exists():
@@ -255,15 +269,17 @@ def load_font(path: Optional[Path], size_px: int) -> ImageFont.FreeTypeFont:
         pass
     return ImageFont.load_default()
 
-def text_wh(text: str, font: ImageFont.FreeTypeFont) -> Tuple[int, int]:
+
+def text_wh(text: str, font: ImageFont.FreeTypeFont) -> tuple[int, int]:
     bbox = font.getbbox(text or "")
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
-def wrap_to_lines(text: str, font: ImageFont.FreeTypeFont, max_width_px: int, max_lines: int = 2) -> Optional[List[str]]:
+
+def wrap_to_lines(text: str, font: ImageFont.FreeTypeFont, max_width_px: int, max_lines: int = 2) -> list[str] | None:
     words = (text or "").split()
     if not words:
         return [""]
-    lines: List[str] = []
+    lines: list[str] = []
     cur = words[0]
     for w in words[1:]:
         test = cur + " " + w
@@ -277,10 +293,13 @@ def wrap_to_lines(text: str, font: ImageFont.FreeTypeFont, max_width_px: int, ma
     lines.append(cur)
     return lines
 
+
 # -----------------------------
 # Grid & subtitle sizing
 # -----------------------------
-def best_grid(bed_w: float, bed_h: float, block_w: float, block_h: float, spacing: float, page_margin: float) -> Tuple[int, int, float, float]:
+def best_grid(
+    bed_w: float, bed_h: float, block_w: float, block_h: float, spacing: float, page_margin: float
+) -> tuple[int, int, float, float]:
     usable_w = bed_w - 2 * page_margin
     usable_h = bed_h - 2 * page_margin
     step_x = block_w + spacing
@@ -295,7 +314,10 @@ def best_grid(bed_w: float, bed_h: float, block_w: float, block_h: float, spacin
     start_y = page_margin + (usable_h - total_h) / 2.0
     return cols, rows, start_x, start_y
 
-def compute_subtitle_font_mm(items: List[BlockItem], params: LayoutParams, font_regular: Optional[Path], dpi: int) -> float:
+
+def compute_subtitle_font_mm(
+    items: list[BlockItem], params: LayoutParams, font_regular: Path | None, dpi: int
+) -> float:
     icon_alloc_w = params.block_w * params.max_icon_ratio
     text_w_mm = params.block_w - 2 * params.raster_margin - params.text_icon_gap_mm - icon_alloc_w
     if text_w_mm <= 1.0:
@@ -346,16 +368,19 @@ def compute_subtitle_font_mm(items: List[BlockItem], params: LayoutParams, font_
                 hi_mm = mid
     return round(best, 3)
 
+
 # -----------------------------
 # Tile rendering
 # -----------------------------
-def render_block_tile_png(it: BlockItem,
-                          params: LayoutParams,
-                          font_regular: Optional[Path],
-                          font_bold: Optional[Path],
-                          subtitle_font_mm: float,
-                          dpi: int,
-                          bg_rgb: Optional[Tuple[int, int, int]] = None) -> Image.Image:
+def render_block_tile_png(
+    it: BlockItem,
+    params: LayoutParams,
+    font_regular: Path | None,
+    font_bold: Path | None,
+    subtitle_font_mm: float,
+    dpi: int,
+    bg_rgb: tuple[int, int, int] | None = None,
+) -> Image.Image:
     W = mm_to_px_img(params.block_w, dpi)
     H = mm_to_px_img(params.block_h, dpi)
     if params.color_mode and bg_rgb is not None:
@@ -392,7 +417,7 @@ def render_block_tile_png(it: BlockItem,
             subtitle_h_px += extra_leading_px
 
     # Helper: measure title via draw context
-    def measure_title(font_obj: ImageFont.FreeTypeFont) -> Tuple[int, int]:
+    def measure_title(font_obj: ImageFont.FreeTypeFont) -> tuple[int, int]:
         tb = drw.textbbox((0, 0), it.title, font=font_obj)
         return (tb[2] - tb[0], tb[3] - tb[1])
 
@@ -506,7 +531,6 @@ def render_block_tile_png(it: BlockItem,
     icon_h_px = max(1, H - 2 * raster_px - reserved_dots_h)
     icon_w_max_px = icon_alloc_w_px
     # Track icon bounds (left x) if needed later
-    icon_left_x: Optional[int] = None
     if it.image_path and it.image_path.exists():
         try:
             ic = Image.open(it.image_path)
@@ -529,7 +553,6 @@ def render_block_tile_png(it: BlockItem,
             # Center within the available icon area (which excludes reserved dots space)
             iy = raster_px + (icon_h_px - draw_h) // 2
             img.alpha_composite(ic, (ix, iy))
-            icon_left_x = ix
         except Exception:
             pass
 
@@ -548,10 +571,11 @@ def render_block_tile_png(it: BlockItem,
         if params.color_mode and params.dot_rgb:
             dot_fill = (params.dot_rgb[0], params.dot_rgb[1], params.dot_rgb[2], 255)
         for _ in range(it.dot_count):
-            drw.ellipse((cx - dot_d//2, cy - dot_d//2, cx + dot_d//2, cy + dot_d//2), fill=dot_fill)
+            drw.ellipse((cx - dot_d // 2, cy - dot_d // 2, cx + dot_d // 2, cy + dot_d // 2), fill=dot_fill)
             cx += dot_d + dot_gap_horiz
 
     return img
+
 
 # -----------------------------
 # SVG writing (pages + template)
@@ -559,12 +583,15 @@ def render_block_tile_png(it: BlockItem,
 def svg_header_mm(w_mm: float, h_mm: float) -> str:
     return f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="{w_mm}mm" height="{h_mm}mm" viewBox="0 0 {w_mm} {h_mm}">\n'
 
+
 def svg_footer() -> str:
     return "</svg>\n"
+
 
 def write_text(path: Path, text: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
 
 def generate_template_svg(params: LayoutParams, cols: int, rows: int, start_x: float, start_y: float) -> str:
     hole_w = params.block_w + 2 * params.template_tol
@@ -573,16 +600,23 @@ def generate_template_svg(params: LayoutParams, cols: int, rows: int, start_x: f
     step_y = params.block_h + params.spacing
 
     s = [svg_header_mm(params.bed_w, params.bed_h)]
-    s.append(f'<rect x="0" y="0" width="{params.bed_w}" height="{params.bed_h}" fill="none" stroke="#000" stroke-width="0.2"/>')
+    s.append(
+        f'<rect x="0" y="0" width="{params.bed_w}" height="{params.bed_h}" fill="none" stroke="#000" stroke-width="0.2"/>'
+    )
     for r in range(rows):
         for c in range(cols):
             x = start_x + c * step_x - params.template_tol
             y = start_y + r * step_y - params.template_tol
-            s.append(f'<rect x="{x:.3f}" y="{y:.3f}" width="{hole_w:.3f}" height="{hole_h:.3f}" fill="none" stroke="#000" stroke-width="0.2"/>')
+            s.append(
+                f'<rect x="{x:.3f}" y="{y:.3f}" width="{hole_w:.3f}" height="{hole_h:.3f}" fill="none" stroke="#000" stroke-width="0.2"/>'
+            )
     s.append(svg_footer())
     return "".join(s)
 
-def generate_template_png(params: LayoutParams, cols: int, rows: int, start_x: float, start_y: float, dpi: int) -> Image.Image:
+
+def generate_template_png(
+    params: LayoutParams, cols: int, rows: int, start_x: float, start_y: float, dpi: int
+) -> Image.Image:
     W = mm_to_px_img(params.bed_w, dpi)
     H = mm_to_px_img(params.bed_h, dpi)
     img = Image.new("RGB", (W, H), "white")
@@ -600,9 +634,17 @@ def generate_template_png(params: LayoutParams, cols: int, rows: int, start_x: f
             drw.rectangle((x, y, x + hole_w, y + hole_h), outline="black", width=1)
     return img
 
-def compose_page_svg_from_tiles(items_slice: List[BlockItem], tiles_slice: List[Image.Image],
-                                params: LayoutParams, cols: int, rows: int, start_x: float, start_y: float,
-                                dpi_encode: int) -> str:
+
+def compose_page_svg_from_tiles(
+    items_slice: list[BlockItem],
+    tiles_slice: list[Image.Image],
+    params: LayoutParams,
+    cols: int,
+    rows: int,
+    start_x: float,
+    start_y: float,
+    dpi_encode: int,
+) -> str:
     """Embed each tile as a base64 PNG at the correct mm coordinates in a single SVG (no outlines)."""
     step_x = params.block_w + params.spacing
     step_y = params.block_h + params.spacing
@@ -618,13 +660,23 @@ def compose_page_svg_from_tiles(items_slice: List[BlockItem], tiles_slice: List[
         tiles_slice[idx].save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         href = f"data:image/png;base64,{b64}"
-        s.append(f'<image href="{href}" x="{x:.3f}" y="{y:.3f}" width="{params.block_w:.3f}" height="{params.block_h:.3f}" preserveAspectRatio="none"/>')
+        s.append(
+            f'<image href="{href}" x="{x:.3f}" y="{y:.3f}" width="{params.block_w:.3f}" height="{params.block_h:.3f}" preserveAspectRatio="none"/>'
+        )
     s.append(svg_footer())
     return "".join(s)
 
-def compose_page_png_preview(items_slice: List[BlockItem], tiles_slice: List[Image.Image],
-                             params: LayoutParams, cols: int, rows: int, start_x: float, start_y: float,
-                             dpi: int) -> Image.Image:
+
+def compose_page_png_preview(
+    items_slice: list[BlockItem],
+    tiles_slice: list[Image.Image],
+    params: LayoutParams,
+    cols: int,
+    rows: int,
+    start_x: float,
+    start_y: float,
+    dpi: int,
+) -> Image.Image:
     """Quick raster preview — no borders or page rectangle."""
     W = mm_to_px_img(params.bed_w, dpi)
     H = mm_to_px_img(params.bed_h, dpi)
@@ -644,17 +696,20 @@ def compose_page_png_preview(items_slice: List[BlockItem], tiles_slice: List[Ima
 
     return img
 
+
 # -----------------------------
 # Commands
 # -----------------------------
-def cmd_check_images(root: Path, json_name: str, dot_map: Dict[str, int]) -> int:
+def cmd_check_images(root: Path, json_name: str, dot_map: dict[str, int]) -> int:
     items = parse_blocks_json(root, json_name, dot_map)
-    missing: Dict[str, List[str]] = {}
+    missing: dict[str, list[str]] = {}
     for it in items:
         if it.image_path is None or not it.image_path.exists():
-            missing.setdefault(it.category, []).append((it.title, getattr(it, 'expected_image_name', sanitize_first_word_for_filename(it.title))))
+            missing.setdefault(it.category, []).append(
+                (it.title, getattr(it, "expected_image_name", sanitize_first_word_for_filename(it.title)))
+            )
     if not missing:
-        print("All blocks have matching images. ✅")
+        print("All blocks have matching images.")
         return 0
     print("Missing images by category:")
     for cat in sorted(missing.keys()):
@@ -663,19 +718,22 @@ def cmd_check_images(root: Path, json_name: str, dot_map: Dict[str, int]) -> int
             print(f"      • {title}  (expected: {expected}.png)")
     return 1
 
-def cmd_build(root: Path,
-              outdir: Path,
-              json_name: str,
-              font_regular: Optional[Path],
-              font_bold: Optional[Path],
-              params: LayoutParams,
-              dot_map: Dict[str, int]) -> None:
+
+def cmd_build(
+    root: Path,
+    outdir: Path,
+    json_name: str,
+    font_regular: Path | None,
+    font_bold: Path | None,
+    params: LayoutParams,
+    dot_map: dict[str, int],
+) -> None:
 
     items = parse_blocks_json(root, json_name, dot_map)
 
-    cols, rows, start_x, start_y = best_grid(params.bed_w, params.bed_h,
-                                             params.block_w, params.block_h,
-                                             params.spacing, params.page_margin)
+    cols, rows, start_x, start_y = best_grid(
+        params.bed_w, params.bed_h, params.block_w, params.block_h, params.spacing, params.page_margin
+    )
     per_page = cols * rows
     total = len(items)
     pages = max(1, math.ceil(total / per_page))
@@ -695,9 +753,14 @@ def cmd_build(root: Path,
     # 2) Tiles
     tiles_dir = outdir / "tiles"
     tiles_dir.mkdir(exist_ok=True)
-    all_tiles: List[Image.Image] = []
-    def interp(a: Tuple[int,int,int], b: Tuple[int,int,int], t: float) -> Tuple[int,int,int]:
-        return (int(round(a[0] + (b[0]-a[0])*t)), int(round(a[1] + (b[1]-a[1])*t)), int(round(a[2] + (b[2]-a[2])*t)))
+    all_tiles: list[Image.Image] = []
+
+    def interp(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+        return (
+            int(round(a[0] + (b[0] - a[0]) * t)),
+            int(round(a[1] + (b[1] - a[1]) * t)),
+            int(round(a[2] + (b[2] - a[2]) * t)),
+        )
 
     for i, it in enumerate(items, start=1):
         bg_rgb = None
@@ -707,7 +770,7 @@ def cmd_build(root: Path,
             elif params.background_style == "per-category" and params.background_per_category:
                 bg_rgb = params.background_per_category.get(it.category, params.background_rgb)
             elif params.background_style == "gradient" and params.background_grad_0 and params.background_grad_1:
-                t = 0.0 if total <= 1 else (i-1) / (total-1)
+                t = 0.0 if total <= 1 else (i - 1) / (total - 1)
                 bg_rgb = interp(params.background_grad_0, params.background_grad_1, t)
 
         tile = render_block_tile_png(it, params, font_regular, font_bold, subtitle_mm, params.preview_dpi, bg_rgb)
@@ -720,25 +783,36 @@ def cmd_build(root: Path,
         sl_items = items[i0:i1]
         sl_tiles = all_tiles[i0:i1]
 
-        svg_text = compose_page_svg_from_tiles(sl_items, sl_tiles, params, cols, rows, start_x, start_y, params.preview_dpi)
-        write_text(outdir / f"raster_page_{p+1:02d}.svg", svg_text)
+        svg_text = compose_page_svg_from_tiles(
+            sl_items, sl_tiles, params, cols, rows, start_x, start_y, params.preview_dpi
+        )
+        write_text(outdir / f"raster_page_{p + 1:02d}.svg", svg_text)
 
-        prev_img = compose_page_png_preview(sl_items, sl_tiles, params, cols, rows, start_x, start_y, params.preview_dpi)
-        prev_img.save(outdir / f"raster_page_{p+1:02d}.png")
+        prev_img = compose_page_png_preview(
+            sl_items, sl_tiles, params, cols, rows, start_x, start_y, params.preview_dpi
+        )
+        prev_img.save(outdir / f"raster_page_{p + 1:02d}.png")
 
     print(f"Done. Files written to {outdir.resolve()}")
+
 
 # -----------------------------
 # CLI
 # -----------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Generate raster sheets and a cardboard alignment template for Jenga block laser engraving (clean icons, no overlaps).")
+    parser = argparse.ArgumentParser(
+        description="Generate raster sheets and a cardboard alignment template for Jenga block laser engraving (clean icons, no overlaps)."
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def add_common(p):
-        p.add_argument("--root", type=Path, default=Path("."), help="Project root (contains blocks.json & category folders).")
+        p.add_argument(
+            "--root", type=Path, default=Path("."), help="Project root (contains blocks.json & category folders)."
+        )
         p.add_argument("--json", type=str, default="blocks.json", help="JSON file name at root.")
-        p.add_argument("--dots", type=str, default=None, help="Override dots, e.g. 'drinking=1,truth=2,dare=3,spicy=4'.")
+        p.add_argument(
+            "--dots", type=str, default=None, help="Override dots per category, e.g. 'warm-up=1,challenge=2,story=3'."
+        )
 
     p_check = sub.add_parser("check-images", help="List blocks without matching images.")
     add_common(p_check)
@@ -758,15 +832,28 @@ def main():
     # Content layout
     p_build.add_argument("--raster-margin", type=float, default=1.0, help="Inner margin inside block (mm).")
     p_build.add_argument("--template-tol", type=float, default=0.5, help="Template cutout tolerance per side (mm).")
-    p_build.add_argument("--title-mm", type=float, default=None, help="Title font size (mm). Default ~36% of block height.")
-    p_build.add_argument("--title-sub-gap-mm", type=float, default=0.6, help="Vertical gap between title and subtitle (mm).")
+    p_build.add_argument(
+        "--title-mm", type=float, default=None, help="Title font size (mm). Default ~36%% of block height."
+    )
+    p_build.add_argument(
+        "--title-sub-gap-mm", type=float, default=0.6, help="Vertical gap between title and subtitle (mm)."
+    )
     p_build.add_argument("--dot-mm", type=float, default=1.5, help="Dot diameter (mm).")
     p_build.add_argument("--dot-gap-mm", type=float, default=0.9, help="Horizontal gap between dots (mm).")
-    p_build.add_argument("--dot-vgap-mm", type=float, default=0.6, help="Legacy: dots are bottom-right; kept for compatibility.")
-    p_build.add_argument("--icon-ratio", type=float, default=0.20, help="Max icon width fraction of block width (≤0.20).")
+    p_build.add_argument(
+        "--dot-vgap-mm", type=float, default=0.6, help="Legacy: dots are bottom-right; kept for compatibility."
+    )
+    p_build.add_argument(
+        "--icon-ratio", type=float, default=0.20, help="Max icon width fraction of block width (≤0.20)."
+    )
     p_build.add_argument("--text-icon-gap-mm", type=float, default=1.6, help="Gap between text and icon (mm).")
     p_build.add_argument("--line-height", type=float, default=1.08, help="Subtitle line-height multiplier.")
-    p_build.add_argument("--icon-white-threshold", type=int, default=200, help="0..255: pixels with lightness >= threshold become transparent (for opaque icons).")
+    p_build.add_argument(
+        "--icon-white-threshold",
+        type=int,
+        default=200,
+        help="0..255: pixels with lightness >= threshold become transparent (for opaque icons).",
+    )
 
     # Rendering
     p_build.add_argument("--preview-dpi", type=int, default=300, help="Rendering DPI (also controls PNG previews).")
@@ -785,11 +872,11 @@ def main():
 
     # Auto-pick fonts from project root if not provided (build path)
     root: Path = args.root
-    auto_title = autofind_font(root, ["title.ttf", "Title.ttf"])
-    auto_sub = autofind_font(root, ["subtitle.ttf", "Subtitle.ttf"])
+    auto_title = autofind_font(root, ["title.ttf", "Title.ttf", "title.otf"]) or BUNDLED_TITLE_FONT
+    auto_sub = autofind_font(root, ["subtitle.ttf", "Subtitle.ttf", "subtitle.otf"]) or BUNDLED_SUBTITLE_FONT
 
-    font_regular = args.font if getattr(args, 'font', None) else auto_sub
-    font_bold = args.font_bold if getattr(args, 'font_bold', None) else auto_title
+    font_regular = args.font if getattr(args, "font", None) else auto_sub
+    font_bold = args.font_bold if getattr(args, "font_bold", None) else auto_title
 
     params = LayoutParams(
         bed_w=args.bed_w,
@@ -821,6 +908,7 @@ def main():
         params=params,
         dot_map=dot_map,
     )
+
 
 if __name__ == "__main__":
     main()

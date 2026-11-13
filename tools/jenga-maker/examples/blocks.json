@@ -1,0 +1,44 @@
+{
+  "Warm-up": [
+    "*High Five* high five everyone before you pull",
+    "*Compliment* say something kind to the player on your left",
+    "*Accent* speak in an accent until your next turn",
+    "*Statue* freeze in a pose until someone laughs",
+    "*Left Hand* play your next turn with your off hand",
+    "*Theme Song* hum a TV theme until someone guesses it",
+    "*Swap Seats* trade places with any player",
+    "*Mirror* copy the player across from you",
+    "*Name Game* name a fruit for each letter of your name",
+    "*Toast* raise a glass to the best idea today",
+    "*Echo* repeat everyone's last word for a round",
+    "*Fan Club* the group cheers loudly for your next pull"
+  ],
+  "Challenge": [
+    "*Speed Round* pull your next block in under ten seconds",
+    "*One Finger* pull this round using a single finger",
+    "*Blindfold* pull your next block with your eyes closed",
+    "*Balance* stand on one leg while you play",
+    "*Rhyme Time* go around rhyming until someone stalls",
+    "*Categories* name things from A to Z as a group",
+    "*Tongue Twister* say red lorry yellow lorry five times fast",
+    "*Hum It* hum a song until someone names it",
+    "*Countdown* count to twenty, one voice at a time",
+    "*Rock Paper* best of three against the player of your choice",
+    "*Staring Contest* first to blink takes the next turn",
+    "*Architect* everyone places blocks crosswise"
+  ],
+  "Story": [
+    "*First Concert* describe your first concert",
+    "*Hidden Talent* show off a talent nobody knows about",
+    "*Dream Trip* where would you go with a free plane ticket",
+    "*Best Meal* describe the best meal you have ever eaten",
+    "*First Job* tell us about your very first job",
+    "*Superpower* pick one superpower and defend your choice",
+    "*Time Machine* past or future, and which year",
+    "*Movie Line* quote a movie and let the group guess it",
+    "*Proudest Build* what is the best thing you have ever made",
+    "*Bucket List* share one thing you will do this year",
+    "*Childhood Toy* describe your favorite toy as a kid",
+    "*Two Truths* share two truths and a lie, the group guesses"
+  ]
+}

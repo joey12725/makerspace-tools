@@ -742,7 +742,7 @@ function Block({ block, from }) {
           <textarea
             value={csv}
             onChange={(e) => setCsv(e.target.value)}
-            placeholder="e.g. Take a sip, Do 10 pushups, Tell a joke, Swap seats, Sing a song"
+            placeholder="e.g. Do 10 pushups, Tell a joke, Swap seats, Sing a song"
             className="h-28 w-full rounded-xl border border-white/20 bg-white/10 p-3 text-sm text-white shadow focus:outline-none"
           />
           <div className="mt-2 flex items-center gap-2">
@@ -899,7 +899,7 @@ function Block({ block, from }) {
           <textarea
             value={jsonPaste}
             onChange={(e) => setJsonPaste(e.target.value)}
-            placeholder='{"Category A": ["Take a sip", "Tell a joke"], "Category B": ["..."]}'
+            placeholder='{"Category A": ["Tell a joke", "Swap seats"], "Category B": ["..."]}'
             className="h-48 w-full rounded-xl border border-white/20 bg-white/10 p-3 text-sm text-white shadow focus:outline-none"
           />
           <div className="mt-2 flex items-center gap-2">

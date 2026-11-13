@@ -1,14 +1,12 @@
 import io
 import json
-import os
 import re
-import shutil
 import sys
 import tempfile
 import zipfile
 from pathlib import Path
 
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, jsonify, request, send_file
 
 # Ensure we can import the project script from repo root
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +14,7 @@ sys.path.append(str(ROOT))
 
 try:
     import make_jenga_layout as mj
-except Exception as e:
+except Exception:
     mj = None
 
 app = Flask(__name__)
@@ -49,7 +47,7 @@ def generate():
 
     # Build normalized category map based on blocks_map keys
     cat_keys = list(blocks_map.keys())
-    norm_to_real = { _norm_cat(k): k for k in cat_keys }
+    norm_to_real = {_norm_cat(k): k for k in cat_keys}
 
     # Create temp project root
     with tempfile.TemporaryDirectory() as td:
@@ -74,7 +72,7 @@ def generate():
         # 3) Pre-compute expected image names using the project logic
         try:
             # Convert dots mapping keys to lowercase for parser
-            dot_map = { (k or "").strip().lower(): int(v) for k, v in (dots or {}).items() }
+            dot_map = {(k or "").strip().lower(): int(v) for k, v in (dots or {}).items()}
         except Exception:
             dot_map = mj.CATEGORY_DEFAULT_DOTS
 
@@ -90,14 +88,8 @@ def generate():
         for key in request.files:
             if not key.startswith("images_"):
                 continue
-            cat_norm = key[len("images_"):]
+            cat_norm = key[len("images_") :]
             cat_real = norm_to_real.get(cat_norm)
-            if not cat_real:
-                # If no direct match, try loose contain match
-                for nk, rk in norm_to_real.items():
-                    if nk == cat_norm:
-                        cat_real = rk
-                        break
             if not cat_real:
                 continue
 
@@ -126,6 +118,7 @@ def generate():
                 # Convert to PNG via Pillow if not PNG
                 try:
                     from PIL import Image
+
                     im = Image.open(f.stream)
                     im = im.convert("RGBA")
                     im.save(target, format="PNG")
@@ -163,30 +156,12 @@ def generate():
                 lp.dots_enabled = show_dots
             # Color options
             mode = (color_cfg.get("mode") or "bw").strip().lower()
-            lp.color_mode = (mode == "color")
+            lp.color_mode = mode == "color"
             if lp.color_mode:
-                def _hex_to_rgb(s):
-                    s = (s or "").strip()
-                    if not s:
-                        return None
-                    if s.startswith('#'):
-                        s2 = s[1:]
-                    else:
-                        s2 = s
-                    if len(s2) == 3:
-                        try:
-                            return (int(s2[0]*2,16), int(s2[1]*2,16), int(s2[2]*2,16))
-                        except Exception:
-                            return None
-                    if len(s2) == 6:
-                        try:
-                            return (int(s2[0:2],16), int(s2[2:4],16), int(s2[4:6],16))
-                        except Exception:
-                            return None
-                    return None
+                _hex_to_rgb = mj.parse_hex_color
 
-                lp.title_rgb = _hex_to_rgb(color_cfg.get("title")) or (0,0,0)
-                lp.subtitle_rgb = _hex_to_rgb(color_cfg.get("subtitle")) or (0,0,0)
+                lp.title_rgb = _hex_to_rgb(color_cfg.get("title")) or (0, 0, 0)
+                lp.subtitle_rgb = _hex_to_rgb(color_cfg.get("subtitle")) or (0, 0, 0)
                 dot_hex = color_cfg.get("dot")
                 if dot_hex:
                     lp.dot_rgb = _hex_to_rgb(dot_hex)
@@ -197,7 +172,7 @@ def generate():
                     style = "solid"
                 lp.background_style = style
                 if style == "solid":
-                    lp.background_rgb = _hex_to_rgb(bg.get("solid") or "#ffffff") or (255,255,255)
+                    lp.background_rgb = _hex_to_rgb(bg.get("solid") or "#ffffff") or (255, 255, 255)
                 elif style == "per-category":
                     per = bg.get("perCategory") or {}
                     per_rgb = {}
@@ -208,21 +183,26 @@ def generate():
                         per_rgb[(k or "").strip().lower()] = c
                     lp.background_per_category = per_rgb
                     # default fallback color if specific category missing
-                    lp.background_rgb = _hex_to_rgb(bg.get("solid") or "#ffffff") or (255,255,255)
+                    lp.background_rgb = _hex_to_rgb(bg.get("solid") or "#ffffff") or (255, 255, 255)
                 elif style == "gradient":
                     arr = bg.get("gradient") or []
-                    c0 = _hex_to_rgb(arr[0]) if len(arr) > 0 else (255,255,255)
-                    c1 = _hex_to_rgb(arr[1]) if len(arr) > 1 else (200,200,200)
-                    lp.background_grad_0 = c0 or (255,255,255)
-                    lp.background_grad_1 = c1 or (200,200,200)
+                    c0 = _hex_to_rgb(arr[0]) if len(arr) > 0 else (255, 255, 255)
+                    c1 = _hex_to_rgb(arr[1]) if len(arr) > 1 else (200, 200, 200)
+                    lp.background_grad_0 = c0 or (255, 255, 255)
+                    lp.background_grad_1 = c1 or (200, 200, 200)
         except Exception as e:
             return jsonify({"error": f"Invalid params: {e}"}), 400
 
         outdir = root / "output"
 
         # Auto font discovery: if uploads present they reside as title.* / subtitle.*
-        title_auto = mj.autofind_font(root, ["title.ttf", "Title.ttf", "title.otf", "Title.otf"])
-        sub_auto = mj.autofind_font(root, ["subtitle.ttf", "Subtitle.ttf", "subtitle.otf", "Subtitle.otf"])
+        title_auto = (
+            mj.autofind_font(root, ["title.ttf", "Title.ttf", "title.otf", "Title.otf"]) or mj.BUNDLED_TITLE_FONT
+        )
+        sub_auto = (
+            mj.autofind_font(root, ["subtitle.ttf", "Subtitle.ttf", "subtitle.otf", "Subtitle.otf"])
+            or mj.BUNDLED_SUBTITLE_FONT
+        )
 
         try:
             mj.cmd_build(
