@@ -1,181 +1,206 @@
+#!/usr/bin/env python3
+"""Tile a folder of line art into one crisp 1-bit sheet for lithophanes and laser engraving.
 
-import os
+Every image is trimmed to its ink, scaled into a shared cell size, hard-thresholded
+to pure black and white, and packed into a centered grid. The result is a single
+1-bit PNG that drops straight into a lithophane generator or laser software.
+
+    python lithophane_tiler.py samples/ -o sheet.png
+    python lithophane_tiler.py samples/ -o sheet.png --cols 3 --padding 24 --threshold 110
+    python lithophane_tiler.py --verify sheet.png
+"""
+
+from __future__ import annotations
+
+import argparse
 import math
-from PIL import Image, ImageOps
+import sys
+from dataclasses import dataclass
+from pathlib import Path
 
-def get_images(directory):
-    extensions = ['.png', '.jpg', '.jpeg']
-    files = [os.path.join(directory, f) for f in os.listdir(directory) 
-             if os.path.splitext(f)[1].lower() in extensions 
-             and not f.startswith('lithophane_output')]
-    # Sort to ensure deterministic order
-    files.sort()
-    return files
+import numpy as np
+from PIL import Image
 
-def calculate_grid_layout(num_images):
-    # For 15 images, 3x5 is ideal.
-    if num_images == 15:
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+# Pixels at or below this gray level count as ink (roughly 65% black).
+DEFAULT_THRESHOLD = 89
+
+# How many ink pixels a trim edge must skip, so a few stray specks
+# near the border do not stop the crop from tightening.
+DEFAULT_SPECK_TOLERANCE = 3
+
+
+@dataclass(frozen=True)
+class SheetLayout:
+    rows: int
+    cols: int
+    cell_w: int
+    cell_h: int
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return self.cols * self.cell_w, self.rows * self.cell_h
+
+
+def find_images(directory: Path, exclude: Path | None = None) -> list[Path]:
+    """Return image files in ``directory`` in a stable, sorted order."""
+    files = [p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+    if exclude is not None:
+        files = [p for p in files if p.resolve() != exclude.resolve()]
+    return sorted(files)
+
+
+def grid_for(count: int, cols: int | None = None) -> tuple[int, int]:
+    """Pick a (rows, cols) grid that holds ``count`` tiles, slightly wider than tall."""
+    if count < 1:
+        raise ValueError("need at least one image")
+    if cols:
+        return math.ceil(count / cols), cols
+    if count == 15:
         return 3, 5
-        
-    # For other numbers, try to find a grid that is roughly rectangular.
-    # We want rows * cols >= num_images.
-    # We prefer a layout that is slightly wider than it is tall (landscape style overall).
-    rows = int(math.sqrt(num_images))
-    cols = math.ceil(num_images / rows)
-    
-    return rows, cols
+    rows = max(1, int(math.sqrt(count)))
+    return rows, math.ceil(count / rows)
 
-def get_safe_crop_box(img, threshold=89):
+
+def ink_bounds(
+    gray: Image.Image,
+    threshold: int = DEFAULT_THRESHOLD,
+    speck_tolerance: int = DEFAULT_SPECK_TOLERANCE,
+) -> tuple[int, int, int, int]:
+    """Bounding box (left, top, right, bottom) of the ink in a grayscale image.
+
+    Each edge sits on the ``speck_tolerance + 1``-th ink pixel counted from that
+    side, so isolated specks are trimmed away. Images with too little ink keep
+    their full frame.
     """
-    Finds the bounding box of the "content" defined by pixels darker than threshold.
-    "Cannot crop past the first 4 black pixels in any given direction" implies:
-    We must preserve the image content from the 4th black pixel on the left to the 4th from right, etc.
-    Actually, to be safe and satisfy "as large as it can be", we should crop TO these bounds 
-    (removing empty white space) but not FURTHER.
-    """
-    # Convert to Greyscale for analysis
-    gray = img.convert("L")
-    width, height = gray.size
-    pixels = gray.load()
-    
-    # Identify all "black" pixels
-    # We store X and Y coordinates of pixels that are considered black
-    black_pixels = []
-    for y in range(height):
-        for x in range(width):
-            if pixels[x, y] <= threshold:
-                black_pixels.append((x, y))
-    
-    if len(black_pixels) < 8:
-        # Not enough black pixels, protect the whole image
+    ink = np.asarray(gray.convert("L")) <= threshold
+    height, width = ink.shape
+    need = speck_tolerance + 1
+    if int(ink.sum()) < 2 * need:
         return (0, 0, width, height)
 
-    # Sort by X to find left/right bounds
-    black_pixels.sort(key=lambda p: p[0])
-    # 4th black pixel from left (index 3)
-    min_x = black_pixels[3][0]
-    # 4th black pixel from right (index -4)
-    max_x = black_pixels[-4][0]
-    
-    # Sort by Y to find top/bottom bounds
-    black_pixels.sort(key=lambda p: p[1])
-    min_y = black_pixels[3][1]
-    max_y = black_pixels[-4][1]
-    
-    # Validity check (ensure crop is valid and non-negative)
-    if min_x >= max_x or min_y >= max_y:
+    def edges(counts: np.ndarray) -> tuple[int, int]:
+        lo = int(np.searchsorted(np.cumsum(counts), need))
+        hi = len(counts) - 1 - int(np.searchsorted(np.cumsum(counts[::-1]), need))
+        return lo, hi
+
+    left, right = edges(ink.sum(axis=0))
+    top, bottom = edges(ink.sum(axis=1))
+    if left >= right or top >= bottom:
         return (0, 0, width, height)
-        
-    return (min_x, min_y, max_x, max_y)
+    return (left, top, right, bottom)
 
-def resize_aspect_fit(img, target_w, target_h):
-    """
-    Resizes image to fit WITHIN the target box, preserving aspect ratio.
-    Pads the rest with White.
-    """
-    img_w, img_h = img.size
-    ratio = min(target_w / img_w, target_h / img_h)
-    new_w = int(img_w * ratio)
-    new_h = int(img_h * ratio)
-    
-    # Resize
-    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    
-    # Create new white background
-    bg = Image.new('L', (target_w, target_h), 255)
-    
-    # Center paste
-    x = (target_w - new_w) // 2
-    y = (target_h - new_h) // 2
-    bg.paste(img, (x, y))
-    
-    return bg
 
-def apply_threshold(img, threshold=89):
-    """
-    Applies strict thresholding.
-    < 65% black (value > 89) -> White (255)
-    >= 65% black (value <= 89) -> Black (0)
-    """
-    # Point function: if x <= threshold return 0 else 255
+def fit_into_cell(img: Image.Image, cell_w: int, cell_h: int) -> Image.Image:
+    """Scale ``img`` to fit inside the cell, centered on a white background."""
+    ratio = min(cell_w / img.width, cell_h / img.height)
+    new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
+    scaled = img.resize(new_size, Image.Resampling.LANCZOS)
+    cell = Image.new("L", (cell_w, cell_h), 255)
+    cell.paste(scaled, ((cell_w - new_size[0]) // 2, (cell_h - new_size[1]) // 2))
+    return cell
+
+
+def binarize(img: Image.Image, threshold: int = DEFAULT_THRESHOLD) -> Image.Image:
+    """Hard threshold: ink becomes 0, everything else 255."""
     return img.point(lambda p: 0 if p <= threshold else 255)
 
-def main():
-    directory = "./images"
-    images = get_images(directory)
-    
-    if not images:
-        print("No images found!")
-        return
 
-    num_images = len(images)
-    print(f"Found {num_images} images.")
-    
-    rows, cols = calculate_grid_layout(num_images)
-    print(f"Layout: {rows} rows x {cols} cols")
-    
-    # 1. Load and Crop "Safe Content"
-    cropped_images = []
-    
-    print("Analyzing images for smart cropping...")
-    for img_path in images:
-        with Image.open(img_path) as img:
-            gray_img = img.convert('L')
-            
-            # Threshold 89 is "65% black" (pixels <= 89 are considered black)
-            box = get_safe_crop_box(gray_img, threshold=89)
-            
-            cropped = gray_img.crop(box)
-            cropped_images.append(cropped)
-            
-    # Calculate Max dimensions
-    max_w = max(img.width for img in cropped_images)
-    max_h = max(img.height for img in cropped_images)
-    
-    print(f"Max Content Size: {max_w}x{max_h}")
-    
-    cell_w = max_w
-    cell_h = max_h
-    
-    # Create canvas
-    canvas_w = cols * cell_w
-    canvas_h = rows * cell_h
-    canvas = Image.new('L', (canvas_w, canvas_h), 255) # White bg
-    
-    print(f"Canvas size: {canvas_w}x{canvas_h}")
-    
-    num_images_last_row = num_images % cols
-    if num_images_last_row == 0:
-        num_images_last_row = cols
+def build_sheet(
+    images: list[Image.Image],
+    threshold: int = DEFAULT_THRESHOLD,
+    cols: int | None = None,
+    padding: int = 0,
+) -> tuple[Image.Image, SheetLayout]:
+    """Trim, normalize and tile ``images`` into one 1-bit sheet.
 
-    for i, img in enumerate(cropped_images):
-        # Resize to fit cell
-        processed_img = resize_aspect_fit(img, cell_w, cell_h)
-        
-        # Threshold
-        final_img = apply_threshold(processed_img, threshold=89)
-        
-        # Paste
-        row = i // cols
-        col = i % cols
-        
+    ``padding`` adds that many white pixels around every tile.
+    """
+    trimmed = []
+    for img in images:
+        gray = img.convert("L")
+        trimmed.append(gray.crop(ink_bounds(gray, threshold)))
+
+    rows, cols = grid_for(len(trimmed), cols)
+    layout = SheetLayout(
+        rows=rows,
+        cols=cols,
+        cell_w=max(t.width for t in trimmed) + 2 * padding,
+        cell_h=max(t.height for t in trimmed) + 2 * padding,
+    )
+    canvas = Image.new("L", layout.size, 255)
+
+    last_row_count = len(trimmed) - (rows - 1) * cols
+    for i, tile in enumerate(trimmed):
+        row, col = divmod(i, cols)
         x_offset = 0
-        if row == rows - 1 and num_images_last_row < cols:
-            # Center the last row
-            x_offset = (canvas_w - (num_images_last_row * cell_w)) // 2
-            
-        x = x_offset + (col * cell_w)
-        y = row * cell_h
-        
-        canvas.paste(final_img, (x, y))
-        print(f"Placed image {i+1}/{num_images} at ({x}, {y})")
+        if row == rows - 1 and last_row_count < cols:
+            # Center a short final row.
+            x_offset = (layout.size[0] - last_row_count * layout.cell_w) // 2
+        inner = fit_into_cell(tile, layout.cell_w - 2 * padding, layout.cell_h - 2 * padding)
+        cell = binarize(inner, threshold)
+        canvas.paste(cell, (x_offset + col * layout.cell_w + padding, row * layout.cell_h + padding))
 
-    # Convert to '1' mode
-    output_img = canvas.convert('1')
-    
-    output_path = os.path.join(directory, "lithophane_output.png")
-    output_img.save(output_path)
-    print(f"Saved lithophane to {output_path}")
+    return canvas.convert("1"), layout
+
+
+def verify(path: Path) -> list[str]:
+    """Return a list of problems with a generated sheet (empty means good)."""
+    problems = []
+    with Image.open(path) as img:
+        if img.mode != "1":
+            problems.append(f"expected 1-bit mode, got {img.mode}")
+        colors = {c for _, c in img.convert("L").getcolors(maxcolors=256) or []}
+        if not colors <= {0, 255}:
+            problems.append(f"found gray levels {sorted(colors - {0, 255})[:5]}")
+    return problems
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("input", type=Path, nargs="?", help="folder of PNG/JPEG artwork")
+    parser.add_argument("-o", "--output", type=Path, default=Path("lithophane_sheet.png"))
+    parser.add_argument(
+        "--threshold", type=int, default=DEFAULT_THRESHOLD, help="gray level (0-255) at or below which a pixel is ink"
+    )
+    parser.add_argument("--cols", type=int, default=None, help="force a column count")
+    parser.add_argument("--padding", type=int, default=0, help="white border around each tile, in pixels")
+    parser.add_argument(
+        "--verify", type=Path, metavar="SHEET", help="check that an existing sheet is pure 1-bit and exit"
+    )
+    args = parser.parse_args(argv)
+
+    if args.verify:
+        problems = verify(args.verify)
+        with Image.open(args.verify) as img:
+            print(f"{args.verify}: {img.width}x{img.height} {img.mode}")
+        for p in problems:
+            print(f"  ! {p}")
+        return 1 if problems else 0
+
+    if args.input is None or not args.input.is_dir():
+        parser.error("input must be a folder of images")
+
+    paths = find_images(args.input, exclude=args.output)
+    if not paths:
+        print(f"No images found in {args.input}", file=sys.stderr)
+        return 1
+
+    images = []
+    for p in paths:
+        with Image.open(p) as img:
+            images.append(img.copy())
+
+    sheet, layout = build_sheet(images, threshold=args.threshold, cols=args.cols, padding=args.padding)
+    sheet.save(args.output)
+    print(
+        f"{len(images)} images -> {layout.rows}x{layout.cols} grid, "
+        f"{layout.cell_w}x{layout.cell_h}px cells, sheet {sheet.width}x{sheet.height}px"
+    )
+    print(f"Saved {args.output}")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
